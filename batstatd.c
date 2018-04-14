@@ -20,6 +20,10 @@
  * SOFTWARE.
  */
 
+#ifndef _DEFAULT_SOURCE
+	#define _DEFAULT_SOURCE
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,12 +35,38 @@
 //#include <sqlite3.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <limits.h>
+#include <getopt.h>
+
+#define PATH_BUF_SIZE (PATH_MAX)
+#define PATH_MAX_LEN (PATH_MAX-1)
+
+#define NAME_BUF_SIZE (NAME_MAX+1)
+#define NAME_MAX_LEN (NAME_MAX)
 
 #define DOTDOT(S) (S[0] == '.' && (!S[1] || (S[1] == '.' && !S[2])))
 
+typedef struct {
+	char* name;
+	char* fmt;
+	void* dst;
+} field;
+
+typedef struct _bat {
+	char* sys_path;
+	char* name;
+	//char* db_path;
+	//sqlite3* db;
+	//char* db_path;
+	//int db_r;
+	//char* db_err;
+	struct _bat* next;
+} bat;
+
 int daemonize(void);
 int cat(const char* const, char* const, const size_t);
-int detect_bats(void);
+int detect_bats(bat**);
+int bat_log(const char* const);
 
 int daemonize(void)
 {
@@ -85,7 +115,7 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 	return e;
 }
 
-int detect_bats(void)
+int detect_bats(bat** H)
 {
 	static const char* const syspath = "/sys/class/power_supply";
 	int e;
@@ -100,8 +130,16 @@ int detect_bats(void)
 		if (DOTDOT(ent->d_name)
 		|| memcmp(ent->d_name, "BAT", 3)) continue;
 		path[syspath_len] = '/';
-		memcpy(path+syspath_len+1, ent->d_name, strlen(ent->d_name)+1);
-		printf("%s\n", ent->d_name);
+		const size_t ent_len = strlen(ent->d_name);
+		memcpy(path+syspath_len+1, ent->d_name, ent_len+1);
+
+		bat* b = malloc(sizeof(bat));
+		b->sys_path = malloc(syspath_len+1+ent_len+1);
+		memcpy(b->sys_path, path, syspath_len+1+ent_len+1);
+		b->name = b->sys_path+syspath_len+1;
+		b->next = *H;
+		*H = b;
+
 		path[syspath_len] = 0;
 	}
 	e = errno;
@@ -109,13 +147,69 @@ int detect_bats(void)
 	return e;
 }
 
+int bat_log(const char* const batpath)
+{
+	char present;
+	unsigned int cycle_count;
+	unsigned int capacity;
+	char capacity_level[32];
+	char status[32];
+	unsigned long charge_full;
+	unsigned long charge_now;
+	unsigned long current_now;
+	unsigned long voltage_now;
+
+	/* TODO is this evil or not? */
+	/* TODO check doc for exact types and possible outputs */
+	const field fields[] = {
+		{ "present", "%c", (void*) &present },
+		{ "cycle_count", "%u", (void*) &cycle_count },
+		{ "capacity", "%u", (void*) &capacity },
+		{ "capacity_level", "%s", (void*) capacity_level },
+		{ "status", "%s", (void*) status },
+		{ "charge_full", "%lu",  (void*) &charge_full },
+		{ "charge_now", "%lu",  (void*) &charge_now },
+		{ "current_now", "%lu",  (void*) &current_now },
+		{ "voltage_now", "%lu",  (void*) &voltage_now },
+		{ NULL, NULL, NULL }
+	};
+
+	const size_t batpath_len = strnlen(batpath, PATH_MAX_LEN);
+	int f = 0;
+	char catbuf[256];
+	char* pathbuf = malloc(batpath_len+1+NAME_BUF_SIZE);
+	memcpy(pathbuf, batpath, batpath_len+1);
+	pathbuf[batpath_len] = '/';
+	while (fields[f].name) {
+		// TODO to sqlite db
+		memcpy(pathbuf+batpath_len+1, fields[f].name, strlen(fields[f].name)+1);
+		cat(pathbuf, catbuf, sizeof(catbuf));
+		printf("%16s: %s", fields[f].name, catbuf);
+		sscanf(catbuf, fields[f].fmt, fields[f].dst);
+		f += 1;
+	}
+	printf("\n");
+	return 0;
+}
+
 int main(int argc, char* argv[])
 {
-	int e;
-	//char* db_path = "./test.db";
-	//sqlite3* sq_db = NULL;
-	//char* sq_err = NULL;
-	//int sq_r;
+	static const char* const help = "...\n";
+	int o, opti = 0;
+	static const char sopt[] = "h";
+	struct option lopt[] = {
+		{"help", no_argument, 0, 'h'},
+		{0, 0, 0, 0}
+	};
+	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
+		switch (o) {
+		case 'h':
+			printf("%s", help);
+			exit(EXIT_SUCCESS);
+		default:
+			exit(EXIT_FAILURE);
+		}
+	}
 
 	//if ((sq_r = sqlite3_open(db_path, &sq_db))) {
 	//	printf("%s\n", sqlite3_errmsg(sq_db));
@@ -127,13 +221,25 @@ int main(int argc, char* argv[])
 	//	printf("%s\n", err_msg);
 	//}
 
-	//detect_bats();
-	if ((e = daemonize())) {
-		fprintf(stderr, "%s\n", strerror(e));
-		exit(EXIT_FAILURE);
+	//int e;
+	//if ((e = daemonize())) {
+	//	fprintf(stderr, "%s\n", strerror(e));
+	//	exit(EXIT_FAILURE);
+	//}
+
+	bat* bats = NULL;
+	detect_bats(&bats);
+
+	for (;;) {
+		bat* B = bats;
+		while (B) {
+			printf("%s (%s)\n", B->sys_path, B->name);
+			bat_log(B->sys_path);
+			B = B->next;
+		}
+		sleep(1);
 	}
 
-	sleep(10); // TEST
 	//sqlite3_close(sq_db);
 	exit(EXIT_SUCCESS);
 }
