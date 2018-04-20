@@ -32,7 +32,7 @@
 #include <errno.h>
 #include <dirent.h>
 //#include <time.h>
-//#include <sqlite3.h>
+#include <sqlite3.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <limits.h>
@@ -53,20 +53,22 @@ typedef struct {
 } field;
 
 typedef struct _bat {
+	struct _bat* next;
 	char* sys_path;
 	char* name;
-	//char* db_path;
-	//sqlite3* db;
-	//char* db_path;
-	//int db_r;
-	//char* db_err;
-	struct _bat* next;
+	char* db_path;
+	sqlite3* db;
+	int db_r;
+	char* db_err;
 } bat;
 
 int daemonize(void);
 int cat(const char* const, char* const, const size_t);
-int detect_bats(bat**);
-int bat_log(const char* const);
+int detect_bats(bat**, const char* const);
+int bat_init(bat* const);
+int bat_log(bat* const);
+int bat_open(bat* const);
+void bat_close(bat* const);
 
 int daemonize(void)
 {
@@ -115,13 +117,56 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 	return e;
 }
 
-int detect_bats(bat** H)
+static const char* const sql_init =
+"CREATE TABLE log ("
+"id INTEGER PRIMARY KEY AUTOINCREMENT,"
+"present TINYINT NOT NULL,"
+"cycle_count INT NOT NULL,"
+"capacity INT NOT NULL,"
+"capacity_level TEXT NOT NULL,"
+"status TEXT NOT NULL,"
+"charge_full INT NOT NULL,"
+"charge_now INT NOT NULL,"
+"current_now INT NUL NULL,"
+"voltage_now INT NOT NULL"
+");";
+
+int bat_init(bat* const B)
 {
+	if ((B->db_r = sqlite3_open(B->db_path, &B->db))) {
+		// TODO ERR
+		return -1;
+	}
+	if ((B->db_r = sqlite3_exec(B->db, sql_init, NULL, 0, &B->db_err))) {
+
+	}
+	sqlite3_close(B->db);
+	return 0;
+}
+
+int bat_open(bat* const B)
+{
+	if ((B->db_r = sqlite3_open(B->db_path, &B->db))) {
+		// INIT
+	}
+	return 0;
+}
+
+void bat_close(bat* const B)
+{
+	sqlite3_close(B->db);
+	free(B->name);
+	free(B->sys_path);
+	free(B->db_path);
+}
+
+int detect_bats(bat** H, const char* const logs_path)
+{
+	// TODO string hell
 	static const char* const syspath = "/sys/class/power_supply";
-	int e;
-	char path[1024];
 	const size_t syspath_len = strlen(syspath);
-	memcpy(path, syspath, syspath_len+1);
+	const size_t logs_path_len = strlen(logs_path);
+	int e;
 	DIR* sys = opendir(syspath);
 	struct dirent* ent;
 	if (!sys) return errno;
@@ -129,25 +174,36 @@ int detect_bats(bat** H)
 	while ((ent = readdir(sys))) {
 		if (DOTDOT(ent->d_name)
 		|| memcmp(ent->d_name, "BAT", 3)) continue;
-		path[syspath_len] = '/';
-		const size_t ent_len = strlen(ent->d_name);
-		memcpy(path+syspath_len+1, ent->d_name, ent_len+1);
-
 		bat* b = malloc(sizeof(bat));
+		const size_t ent_len = strlen(ent->d_name);
+
+		b->db_path = malloc(logs_path_len+1+ent_len+3+1);
+		snprintf(b->db_path, logs_path_len+1+ent_len+3+1,
+			"%s/%s.db", logs_path, ent->d_name);
+
 		b->sys_path = malloc(syspath_len+1+ent_len+1);
-		memcpy(b->sys_path, path, syspath_len+1+ent_len+1);
-		b->name = b->sys_path+syspath_len+1;
+		snprintf(b->sys_path, syspath_len+1+ent_len+1,
+			"%s/%s", syspath, ent->d_name);
+
+		b->name = malloc(ent_len+1);
+		memcpy(b->name, ent->d_name, ent_len+1);
+
 		b->next = *H;
 		*H = b;
 
-		path[syspath_len] = 0;
+		if (!access(b->db_path, F_OK)) {
+			bat_open(b);
+		}
+		else {
+			bat_init(b);
+		}
 	}
 	e = errno;
 	closedir(sys);
 	return e;
 }
 
-int bat_log(const char* const batpath)
+int bat_log(bat* const B)
 {
 	char present;
 	unsigned int cycle_count;
@@ -174,15 +230,15 @@ int bat_log(const char* const batpath)
 		{ NULL, NULL, NULL }
 	};
 
-	const size_t batpath_len = strnlen(batpath, PATH_MAX_LEN);
+	const size_t syspath_len = strnlen(B->sys_path, PATH_MAX_LEN);
 	int f = 0;
 	char catbuf[256];
-	char* pathbuf = malloc(batpath_len+1+NAME_BUF_SIZE);
-	memcpy(pathbuf, batpath, batpath_len+1);
-	pathbuf[batpath_len] = '/';
+	char* pathbuf = malloc(syspath_len+1+NAME_BUF_SIZE);
+	memcpy(pathbuf, B->sys_path, syspath_len+1);
+	pathbuf[syspath_len] = '/';
 	while (fields[f].name) {
 		// TODO to sqlite db
-		memcpy(pathbuf+batpath_len+1, fields[f].name, strlen(fields[f].name)+1);
+		memcpy(pathbuf+syspath_len+1, fields[f].name, strlen(fields[f].name)+1);
 		cat(pathbuf, catbuf, sizeof(catbuf));
 		printf("%16s: %s", fields[f].name, catbuf);
 		sscanf(catbuf, fields[f].fmt, fields[f].dst);
@@ -194,15 +250,28 @@ int bat_log(const char* const batpath)
 
 int main(int argc, char* argv[])
 {
+	int e;
 	static const char* const help = "...\n";
 	int o, opti = 0;
-	static const char sopt[] = "h";
+	static const char sopt[] = "hd";
 	struct option lopt[] = {
 		{"help", no_argument, 0, 'h'},
+		{"daemon", no_argument, 0, 'd'},
+		{"log-dir", required_argument, 0, 0},
 		{0, 0, 0, 0}
 	};
+	const char* logs_path = "/home/miahuoe"; // TODO
 	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
 		switch (o) {
+		case 'd':
+			if ((e = daemonize())) {
+				fprintf(stderr, "%s\n", strerror(e));
+				exit(EXIT_FAILURE);
+			}
+			break;
+		case 'l':
+			logs_path = optarg;
+			break;
 		case 'h':
 			printf("%s", help);
 			exit(EXIT_SUCCESS);
@@ -211,35 +280,18 @@ int main(int argc, char* argv[])
 		}
 	}
 
-	//if ((sq_r = sqlite3_open(db_path, &sq_db))) {
-	//	printf("%s\n", sqlite3_errmsg(sq_db));
-	//	exit(EXIT_FAILURE);
-	//}
-
-	//r = sqlite3_exec(db, sql_init, callback, 0, &err_msg);
-	//if (r != SQLITE_OK) {
-	//	printf("%s\n", err_msg);
-	//}
-
-	//int e;
-	//if ((e = daemonize())) {
-	//	fprintf(stderr, "%s\n", strerror(e));
-	//	exit(EXIT_FAILURE);
-	//}
-
 	bat* bats = NULL;
-	detect_bats(&bats);
+	detect_bats(&bats, logs_path);
 
 	for (;;) {
 		bat* B = bats;
 		while (B) {
 			printf("%s (%s)\n", B->sys_path, B->name);
-			bat_log(B->sys_path);
+			bat_log(B);
 			B = B->next;
 		}
 		sleep(1);
 	}
 
-	//sqlite3_close(sq_db);
 	exit(EXIT_SUCCESS);
 }
