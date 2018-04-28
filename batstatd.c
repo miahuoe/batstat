@@ -31,7 +31,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <dirent.h>
-//#include <time.h>
+#include <time.h>
 #include <sqlite3.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -120,6 +120,7 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 static const char* const sql_init =
 "CREATE TABLE log ("
 "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+"time UNSIGNED BIG INT,"
 "present TINYINT NOT NULL,"
 "cycle_count INT NOT NULL,"
 "capacity INT NOT NULL,"
@@ -214,6 +215,7 @@ int bat_log(bat* const B)
 	unsigned long charge_now;
 	unsigned long current_now;
 	unsigned long voltage_now;
+	time_t t;
 
 	/* TODO is this evil or not? */
 	/* TODO check doc for exact types and possible outputs */
@@ -236,15 +238,31 @@ int bat_log(bat* const B)
 	char* pathbuf = malloc(syspath_len+1+NAME_BUF_SIZE);
 	memcpy(pathbuf, B->sys_path, syspath_len+1);
 	pathbuf[syspath_len] = '/';
+	char qbuf[1024];
 	while (fields[f].name) {
-		// TODO to sqlite db
 		memcpy(pathbuf+syspath_len+1, fields[f].name, strlen(fields[f].name)+1);
 		cat(pathbuf, catbuf, sizeof(catbuf));
-		printf("%16s: %s", fields[f].name, catbuf);
 		sscanf(catbuf, fields[f].fmt, fields[f].dst);
 		f += 1;
 	}
-	printf("\n");
+	t = time(0);
+	snprintf(qbuf, sizeof(qbuf),
+		"INSERT INTO log "
+		"(time,present,cycle_count,"
+		"capacity,capacity_level,"
+		"status,charge_full,charge_now,"
+		"current_now, voltage_now) "
+		"VALUES "
+		"(%lu, %c, %u, %u, '%s', '%s', %lu, %lu, %lu, %lu);",
+		t, present, cycle_count,
+		capacity, capacity_level,
+		status, charge_full, charge_now,
+		current_now, voltage_now
+	);
+	if ((B->db_r = sqlite3_exec(B->db, qbuf, NULL, 0, &B->db_err))) {
+		sqlite3_errmsg(B->db);
+		return B->db_r;
+	}
 	return 0;
 }
 
@@ -260,7 +278,7 @@ int main(int argc, char* argv[])
 		{"log-dir", required_argument, 0, 0},
 		{0, 0, 0, 0}
 	};
-	const char* logs_path = "/home/miahuoe"; // TODO
+	const char* logs_path = "/tmp"; // TODO
 	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
 		switch (o) {
 		case 'd':
@@ -286,7 +304,6 @@ int main(int argc, char* argv[])
 	for (;;) {
 		bat* B = bats;
 		while (B) {
-			printf("%s (%s)\n", B->sys_path, B->name);
 			bat_log(B);
 			B = B->next;
 		}
