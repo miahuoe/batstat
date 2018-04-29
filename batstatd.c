@@ -52,8 +52,11 @@ typedef struct {
 	void* dst;
 } field;
 
+#define FIELDS_LENGTH 16
+
 typedef struct _bat {
 	struct _bat* next;
+	char* fields[FIELDS_LENGTH];
 	char* sys_path;
 	char* name;
 	char* db_path;
@@ -117,20 +120,29 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 	return e;
 }
 
+static const char* const fields[] = {
+	"present",
+	"cycle_count",
+	"capacity",
+	"charge_full",
+	"charge_now",
+	"current_now",
+	"voltage_now",
+	0
+};
+
 static const char* const sql_init =
-"CREATE TABLE log ("
-"id INTEGER PRIMARY KEY AUTOINCREMENT,"
-"time UNSIGNED BIG INT,"
-"present TINYINT NOT NULL,"
-"cycle_count INT NOT NULL,"
-"capacity INT NOT NULL,"
-"capacity_level TEXT NOT NULL,"
-"status TEXT NOT NULL,"
-"charge_full INT NOT NULL,"
-"charge_now INT NOT NULL,"
-"current_now INT NUL NULL,"
-"voltage_now INT NOT NULL"
-");";
+	"CREATE TABLE log ("
+	"id INTEGER PRIMARY KEY AUTOINCREMENT,"
+	"time INTEGER INT,"
+	"present INTEGER NOT NULL,"
+	"cycle_count INTEGER NOT NULL,"
+	"capacity INTEGER NOT NULL,"
+	"charge_full INTEGER NOT NULL,"
+	"charge_now INTEGER NOT NULL,"
+	"current_now INTEGER NUL NULL,"
+	"voltage_now INTEGER NOT NULL"
+	");";
 
 int bat_init(bat* const B)
 {
@@ -163,7 +175,6 @@ void bat_close(bat* const B)
 
 int detect_bats(bat** H, const char* const logs_path)
 {
-	// TODO string hell
 	static const char* const syspath = "/sys/class/power_supply";
 	const size_t syspath_len = strlen(syspath);
 	const size_t logs_path_len = strlen(logs_path);
@@ -175,28 +186,35 @@ int detect_bats(bat** H, const char* const logs_path)
 	while ((ent = readdir(sys))) {
 		if (DOTDOT(ent->d_name)
 		|| memcmp(ent->d_name, "BAT", 3)) continue;
-		bat* b = malloc(sizeof(bat));
+		bat* B = calloc(1, sizeof(bat));
 		const size_t ent_len = strlen(ent->d_name);
 
-		b->db_path = malloc(logs_path_len+1+ent_len+3+1);
-		snprintf(b->db_path, logs_path_len+1+ent_len+3+1,
+		B->db_path = malloc(logs_path_len+1+ent_len+3+1);
+		snprintf(B->db_path, logs_path_len+1+ent_len+3+1,
 			"%s/%s.db", logs_path, ent->d_name);
 
-		b->sys_path = malloc(syspath_len+1+ent_len+1);
-		snprintf(b->sys_path, syspath_len+1+ent_len+1,
+		B->sys_path = malloc(syspath_len+1+ent_len+1);
+		snprintf(B->sys_path, syspath_len+1+ent_len+1,
 			"%s/%s", syspath, ent->d_name);
 
-		b->name = malloc(ent_len+1);
-		memcpy(b->name, ent->d_name, ent_len+1);
+		B->name = malloc(ent_len+1);
+		memcpy(B->name, ent->d_name, ent_len+1);
 
-		b->next = *H;
-		*H = b;
+		B->next = *H;
+		*H = B;
 
-		if (!access(b->db_path, F_OK)) {
-			bat_open(b);
+		if (!access(B->db_path, F_OK)) {
+			bat_open(B);
 		}
 		else {
-			bat_init(b);
+			bat_init(B);
+		}
+		int fi = 0;
+		size_t sys_pathlen = strlen(B->sys_path);
+		while (fields[fi]) {
+			size_t pl = sys_pathlen+1+strlen(fields[fi]);
+			B->fields[fi] = malloc(pl+1);
+			fi += 1;
 		}
 	}
 	e = errno;
@@ -206,58 +224,26 @@ int detect_bats(bat** H, const char* const logs_path)
 
 int bat_log(bat* const B)
 {
-	char present;
-	unsigned int cycle_count;
-	unsigned int capacity;
-	char capacity_level[32];
-	char status[32];
-	unsigned long charge_full;
-	unsigned long charge_now;
-	unsigned long current_now;
-	unsigned long voltage_now;
+	static char catbuf[256];
+	static char qbuf[1024];
+	long long f[FIELDS_LENGTH];
 	time_t t;
+	int fi = 0;
 
-	/* TODO is this evil or not? */
-	/* TODO check doc for exact types and possible outputs */
-	const field fields[] = {
-		{ "present", "%c", (void*) &present },
-		{ "cycle_count", "%u", (void*) &cycle_count },
-		{ "capacity", "%u", (void*) &capacity },
-		{ "capacity_level", "%s", (void*) capacity_level },
-		{ "status", "%s", (void*) status },
-		{ "charge_full", "%lu",  (void*) &charge_full },
-		{ "charge_now", "%lu",  (void*) &charge_now },
-		{ "current_now", "%lu",  (void*) &current_now },
-		{ "voltage_now", "%lu",  (void*) &voltage_now },
-		{ NULL, NULL, NULL }
-	};
-
-	const size_t syspath_len = strnlen(B->sys_path, PATH_MAX_LEN);
-	int f = 0;
-	char catbuf[256];
-	char* pathbuf = malloc(syspath_len+1+NAME_BUF_SIZE);
-	memcpy(pathbuf, B->sys_path, syspath_len+1);
-	pathbuf[syspath_len] = '/';
-	char qbuf[1024];
-	while (fields[f].name) {
-		memcpy(pathbuf+syspath_len+1, fields[f].name, strlen(fields[f].name)+1);
-		cat(pathbuf, catbuf, sizeof(catbuf));
-		sscanf(catbuf, fields[f].fmt, fields[f].dst);
-		f += 1;
+	while (B->fields[fi]) {
+		cat(B->fields[fi], catbuf, sizeof(catbuf));
+		sscanf(catbuf, "%lld", &f[fi]);
+		fi += 1;
 	}
 	t = time(0);
 	snprintf(qbuf, sizeof(qbuf),
 		"INSERT INTO log "
 		"(time,present,cycle_count,"
-		"capacity,capacity_level,"
-		"status,charge_full,charge_now,"
-		"current_now, voltage_now) "
+		"capacity,charge_full,charge_now,"
+		"current_now,voltage_now) "
 		"VALUES "
-		"(%lu, %c, %u, %u, '%s', '%s', %lu, %lu, %lu, %lu);",
-		t, present, cycle_count,
-		capacity, capacity_level,
-		status, charge_full, charge_now,
-		current_now, voltage_now
+		"(%ld, %lld, %lld, %lld, %lld, %lld, %lld, %lld);",
+		t, f[0], f[1], f[2], f[3], f[4], f[5], f[6]
 	);
 	if ((B->db_r = sqlite3_exec(B->db, qbuf, NULL, 0, &B->db_err))) {
 		sqlite3_errmsg(B->db);
@@ -307,8 +293,7 @@ int main(int argc, char* argv[])
 			bat_log(B);
 			B = B->next;
 		}
-		sleep(1);
+		sleep(5);
 	}
-
 	exit(EXIT_SUCCESS);
 }
