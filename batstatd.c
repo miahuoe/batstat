@@ -37,6 +37,7 @@
 #include <sys/stat.h>
 #include <limits.h>
 #include <getopt.h>
+#include <signal.h>
 
 #define PATH_BUF_SIZE (PATH_MAX)
 #define PATH_MAX_LEN (PATH_MAX-1)
@@ -45,12 +46,6 @@
 #define NAME_MAX_LEN (NAME_MAX)
 
 #define DOTDOT(S) (S[0] == '.' && (!S[1] || (S[1] == '.' && !S[2])))
-
-typedef struct {
-	char* name;
-	char* fmt;
-	void* dst;
-} field;
 
 #define FIELDS_LENGTH 16
 
@@ -72,11 +67,11 @@ int bat_init(bat* const);
 int bat_log(bat* const);
 int bat_open(bat* const);
 void bat_close(bat* const);
+void sighandler(int);
 
 int daemonize(void)
 {
 	// TODO pidfile
-	// TODO signals???
 	int nullfd;
 	pid_t pid = fork();
 	if (pid < 0) {
@@ -97,7 +92,10 @@ int daemonize(void)
 	close(nullfd);
 
 	umask(0027);
-	if (chdir("/")) {
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(struct sigaction));
+	sa.sa_handler = sighandler;
+	if (chdir("/") || sigaction(SIGTERM, &sa, NULL)) {
 		return errno;
 	}
 	return 0;
@@ -119,6 +117,8 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 	close(fd);
 	return e;
 }
+
+static const char* const syspath = "/sys/class/power_supply";
 
 static const char* const fields[] = {
 	"present",
@@ -171,11 +171,15 @@ void bat_close(bat* const B)
 	free(B->name);
 	free(B->sys_path);
 	free(B->db_path);
+	int fi = 0;
+	while (B->fields[fi]) {
+		free(B->fields[fi]);
+		fi += 1;
+	}
 }
 
 int detect_bats(bat** H, const char* const logs_path)
 {
-	static const char* const syspath = "/sys/class/power_supply";
 	const size_t syspath_len = strlen(syspath);
 	const size_t logs_path_len = strlen(logs_path);
 	int e;
@@ -252,43 +256,85 @@ int bat_log(bat* const B)
 	return 0;
 }
 
+static bat* bats = 0;
+
+void sighandler(int sig)
+{
+	bat* B, *old;
+	switch (sig) {
+	case SIGTERM:
+		B = bats;
+		while (B) {
+			old = B;
+			bat_close(B);
+			B = B->next;
+			free(old);
+		}
+		exit(EXIT_SUCCESS);
+		break;
+	default:
+		break;
+	}
+}
+
+static const char* const help =
+	"[OPTIONS]\n"
+	"Options:\n"
+	"  -d, --daemon\n"
+	"  \trun in backgroud\n"
+	"  -h, --help\n"
+	"  \tdisplay this help message\n"
+	"  -l, --log-dir\n"
+	"  \tset log directory\n";
+
 int main(int argc, char* argv[])
 {
-	int e;
-	static const char* const help = "...\n";
-	int o, opti = 0;
-	static const char sopt[] = "hd";
+	int e, o, opti = 0;
+	static const char sopt[] = "hdl:";
 	struct option lopt[] = {
-		{"help", no_argument, 0, 'h'},
 		{"daemon", no_argument, 0, 'd'},
-		{"log-dir", required_argument, 0, 0},
+		{"log-dir", required_argument, 0, 'l'},
+		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
 	};
-	const char* logs_path = "/tmp"; // TODO
+	const char* logs_path = 0;
+	_Bool daemon = 0;
+	bat* B;
 	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
 		switch (o) {
 		case 'd':
-			if ((e = daemonize())) {
-				fprintf(stderr, "%s\n", strerror(e));
-				exit(EXIT_FAILURE);
-			}
+			daemon = 1;
 			break;
 		case 'l':
 			logs_path = optarg;
 			break;
 		case 'h':
-			printf("%s", help);
+			printf("Usage: %s %s", argv[0], help);
 			exit(EXIT_SUCCESS);
 		default:
 			exit(EXIT_FAILURE);
 		}
 	}
+	if (!logs_path) {
+		fprintf(stderr, "ERROR: No log path suppiled.\n");
+		exit(EXIT_FAILURE);
+	}
+	if ((e = detect_bats(&bats, logs_path))) {
+		fprintf(stderr, "ERROR: %s\n", strerror(e));
+		exit(EXIT_FAILURE);
+	}
+	if (!bats) {
+		fprintf(stderr, "No batteries detected in '%s'\n", syspath);
+		exit(EXIT_FAILURE);
+	}
+	if (daemon && (e = daemonize())) {
+		fprintf(stderr, "ERROR: %s\n", strerror(e));
+		exit(EXIT_FAILURE);
+	}
 
-	bat* bats = NULL;
-	detect_bats(&bats, logs_path);
 
 	for (;;) {
-		bat* B = bats;
+		B = bats;
 		while (B) {
 			bat_log(B);
 			B = B->next;
