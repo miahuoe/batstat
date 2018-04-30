@@ -49,8 +49,8 @@
 
 #define FIELDS_LENGTH 16
 
-typedef struct _bat {
-	struct _bat* next;
+typedef struct bat {
+	struct bat* next;
 	char* fields[FIELDS_LENGTH];
 	char* sys_path;
 	char* name;
@@ -60,7 +60,7 @@ typedef struct _bat {
 	char* db_err;
 } bat;
 
-int daemonize(void);
+int daemonize(const char* pidfile);
 int cat(const char* const, char* const, const size_t);
 int detect_bats(bat**, const char* const);
 int bat_init(bat* const);
@@ -69,15 +69,22 @@ int bat_open(bat* const);
 void bat_close(bat* const);
 void sighandler(int);
 
-int daemonize(void)
+int daemonize(const char* pidfile)
 {
-	// TODO pidfile
 	int nullfd;
 	pid_t pid = fork();
 	if (pid < 0) {
 		return errno;
 	}
 	if (pid > 0) {
+		int pf = creat(pidfile, 0600);
+		if (pf == -1) {
+			exit(EXIT_FAILURE);
+		}
+		char buf[16];
+		int w = snprintf(buf, sizeof(buf), "%d", pid);
+		write(pf, buf, w);
+		close(pf);
 		exit(EXIT_SUCCESS);
 	}
 
@@ -226,7 +233,7 @@ int bat_log(bat* const B)
 {
 	static char catbuf[256];
 	static char qbuf[1024];
-	long long f[FIELDS_LENGTH];
+	static long long f[FIELDS_LENGTH];
 	time_t t;
 	int fi = 0;
 
@@ -278,26 +285,30 @@ static const char* const help =
 	"[OPTIONS]\n"
 	"Options:\n"
 	"  -d, --daemon\n"
-	"  \trun in backgroud\n"
+	"  \tRun in backgroud.\n"
 	"  -h, --help\n"
-	"  \tdisplay this help message\n"
+	"  \tDisplay this help message.\n"
 	"  -l, --log-dir\n"
-	"  \tset log directory\n"
+	"  \tSet log directory.\n"
 	"  -e, --errout\n"
-	"  \tset error log file\n";
+	"  \tSet error log file.\n"
+	"  -p, --pidfile\n"
+	"  \tCreate pidfile. No effect if used without --daemon.\n";
 
 int main(int argc, char* argv[])
 {
 	int e, o, opti = 0;
-	static const char sopt[] = "hdl:e:";
+	static const char sopt[] = "hdl:e:p:";
 	struct option lopt[] = {
 		{"help", no_argument, 0, 'h'},
 		{"daemon", no_argument, 0, 'd'},
 		{"log-dir", required_argument, 0, 'l'},
 		{"errout", required_argument, 0, 'e'},
+		{"pidfile", required_argument, 0, 'p'},
 		{0, 0, 0, 0}
 	};
 	const char* logs_path = 0;
+	const char* pidfile = 0;
 	_Bool daemon = 0;
 	bat* B;
 	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
@@ -313,6 +324,9 @@ int main(int argc, char* argv[])
 			break;
 		case 'e':
 			errout = fopen(optarg, "a");
+			break;
+		case 'p':
+			pidfile = optarg;
 			break;
 		default:
 			exit(EXIT_FAILURE);
@@ -333,7 +347,7 @@ int main(int argc, char* argv[])
 		fprintf(errout, "No batteries detected in '%s'\n", syspath);
 		exit(EXIT_FAILURE);
 	}
-	if (daemon && (e = daemonize())) {
+	if (daemon && (e = daemonize(pidfile))) {
 		fprintf(errout, "ERROR: %s\n", strerror(e));
 		exit(EXIT_FAILURE);
 	}
