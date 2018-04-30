@@ -51,6 +51,7 @@
 
 typedef struct bat {
 	struct bat* next;
+	sqlite3_stmt* stmt;
 	char* fields[FIELDS_LENGTH];
 	char* sys_path;
 	char* name;
@@ -151,14 +152,18 @@ static const char* const sql_init =
 	"voltage_now INTEGER NOT NULL"
 	");";
 
+static const char* const sql_log =
+	"INSERT INTO log "
+	"(time,present,cycle_count,"
+	"capacity,charge_full,charge_now,"
+	"current_now,voltage_now) "
+	"VALUES (?8, ?1, ?2, ?3, ?4, ?5, ?6, ?7);";
+
 int bat_init(bat* const B)
 {
-	if ((B->db_r = sqlite3_open(B->db_path, &B->db))) {
-		// TODO ERR
+	if ((B->db_r = sqlite3_open(B->db_path, &B->db))
+	|| (B->db_r = sqlite3_exec(B->db, sql_init, NULL, 0, &B->db_err))) {
 		return -1;
-	}
-	if ((B->db_r = sqlite3_exec(B->db, sql_init, NULL, 0, &B->db_err))) {
-		return B->db_r;
 	}
 	sqlite3_close(B->db);
 	return 0;
@@ -167,14 +172,17 @@ int bat_init(bat* const B)
 int bat_open(bat* const B)
 {
 	int fi = 0;
+	const char* tail;
 	while (fields[fi]) {
 		size_t pl = strlen(B->sys_path)+1+strlen(fields[fi]);
 		B->fields[fi] = malloc(pl+1);
 		snprintf(B->fields[fi], pl+1, "%s/%s", B->sys_path, fields[fi]);
 		fi += 1;
 	}
-	if ((B->db_r = sqlite3_open(B->db_path, &B->db))) {
-		return B->db_r;
+	if ((B->db_r = sqlite3_open(B->db_path, &B->db))
+	|| (B->db_r = sqlite3_prepare_v2(B->db,
+		sql_log, strlen(sql_log), &B->stmt, &tail))) {
+		return -1;
 	}
 	return 0;
 }
@@ -185,6 +193,7 @@ void bat_close(bat* const B)
 	free(B->name);
 	free(B->sys_path);
 	free(B->db_path);
+	sqlite3_finalize(B->stmt);
 	int fi = 0;
 	while (B->fields[fi]) {
 		free(B->fields[fi]);
@@ -220,8 +229,7 @@ int detect_bats(bat** H, const char* const logs_path)
 		B->next = *H;
 		*H = B;
 
-		if ((access(B->db_path, F_OK) && bat_init(B))
-		|| bat_open(B)) {
+		if ((access(B->db_path, F_OK) && bat_init(B)) || bat_open(B)) {
 			return 1;
 		}
 	}
@@ -243,17 +251,35 @@ int bat_log(bat* const B)
 		fi += 1;
 	}
 	t = time(0);
-	snprintf(qbuf, sizeof(qbuf),
-		"INSERT INTO log "
-		"(time,present,cycle_count,"
-		"capacity,charge_full,charge_now,"
-		"current_now,voltage_now) "
-		"VALUES "
-		"(%ld, %lld, %lld, %lld, %lld, %lld, %lld, %lld);",
-		t, f[0], f[1], f[2], f[3], f[4], f[5], f[6]
-	);
-	if ((B->db_r = sqlite3_exec(B->db, qbuf, NULL, 0, &B->db_err))) {
-		return B->db_r;
+	if (B->stmt) {
+		if ((B->db_r = sqlite3_reset(B->stmt))
+		|| (B->db_r = sqlite3_clear_bindings(B->stmt))) {
+			return -1;
+		}
+		int i;
+		for (i = 1; i <= fi && !B->db_r; ++i) {
+			B->db_r = sqlite3_bind_int64(B->stmt, i, f[i-1]);
+		}
+		if (B->db_r
+		|| (B->db_r = sqlite3_bind_int64(B->stmt, i, t))
+		|| (B->db_r = sqlite3_step(B->stmt)) != SQLITE_DONE) {
+			return -1;
+		}
+	}
+	else {
+		// TODO
+		snprintf(qbuf, sizeof(qbuf),
+			"INSERT INTO log "
+			"(time,present,cycle_count,"
+			"capacity,charge_full,charge_now,"
+			"current_now,voltage_now) "
+			"VALUES "
+			"(%ld, %lld, %lld, %lld, %lld, %lld, %lld, %lld);",
+			t, f[0], f[1], f[2], f[3], f[4], f[5], f[6]
+		);
+		if ((B->db_r = sqlite3_exec(B->db, qbuf, NULL, 0, &B->db_err))) {
+			return -1;
+		}
 	}
 	return 0;
 }
@@ -353,7 +379,8 @@ int main(int argc, char* argv[])
 		B = bats;
 		while (B) {
 			if (bat_log(B)) {
-				dprintf(errout, "%s\n", sqlite3_errmsg(B->db));
+				dprintf(errout, "E%d: %s\n",
+					B->db_r, sqlite3_errmsg(B->db));
 			}
 			B = B->next;
 		}
