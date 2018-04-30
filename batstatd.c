@@ -259,7 +259,7 @@ int bat_log(bat* const B)
 }
 
 static bat* bats = 0;
-static FILE* errout = 0;
+static int errout = STDERR_FILENO;
 
 void sighandler(int sig)
 {
@@ -273,7 +273,7 @@ void sighandler(int sig)
 			B = B->next;
 			free(old);
 		}
-		fclose(errout);
+		close(errout);
 		exit(EXIT_SUCCESS);
 		break;
 	default:
@@ -288,9 +288,9 @@ static const char* const help =
 	"  \tRun in backgroud.\n"
 	"  -h, --help\n"
 	"  \tDisplay this help message.\n"
-	"  -l, --log-dir\n"
+	"  -l, --logdir\n"
 	"  \tSet log directory.\n"
-	"  -e, --errout\n"
+	"  -e, --errfile\n"
 	"  \tSet error log file.\n"
 	"  -p, --pidfile\n"
 	"  \tCreate pidfile. No effect if used without --daemon.\n";
@@ -302,8 +302,8 @@ int main(int argc, char* argv[])
 	struct option lopt[] = {
 		{"help", no_argument, 0, 'h'},
 		{"daemon", no_argument, 0, 'd'},
-		{"log-dir", required_argument, 0, 'l'},
-		{"errout", required_argument, 0, 'e'},
+		{"logdir", required_argument, 0, 'l'},
+		{"errfile", required_argument, 0, 'e'},
 		{"pidfile", required_argument, 0, 'p'},
 		{0, 0, 0, 0}
 	};
@@ -323,7 +323,7 @@ int main(int argc, char* argv[])
 			logs_path = optarg;
 			break;
 		case 'e':
-			errout = fopen(optarg, "a");
+			errout = open(optarg, O_WRONLY);
 			break;
 		case 'p':
 			pidfile = optarg;
@@ -332,23 +332,20 @@ int main(int argc, char* argv[])
 			exit(EXIT_FAILURE);
 		}
 	}
-	if (!errout) {
-		errout = stderr;
-	}
 	if (!logs_path) {
-		fprintf(errout, "ERROR: No log path suppiled.\n");
+		dprintf(errout, "ERROR: No log path suppiled.\n");
 		exit(EXIT_FAILURE);
 	}
 	if ((e = detect_bats(&bats, logs_path))) {
-		fprintf(errout, "ERROR: %s\n", strerror(e));
+		dprintf(errout, "ERROR: %s\n", strerror(e));
 		exit(EXIT_FAILURE);
 	}
 	if (!bats) {
-		fprintf(errout, "No batteries detected in '%s'\n", syspath);
+		dprintf(errout, "No batteries detected in '%s'\n", syspath);
 		exit(EXIT_FAILURE);
 	}
 	if (daemon && (e = daemonize(pidfile))) {
-		fprintf(errout, "ERROR: %s\n", strerror(e));
+		dprintf(errout, "ERROR: %s\n", strerror(e));
 		exit(EXIT_FAILURE);
 	}
 
@@ -356,7 +353,7 @@ int main(int argc, char* argv[])
 		B = bats;
 		while (B) {
 			if (bat_log(B)) {
-				fprintf(errout, "%s\n", sqlite3_errmsg(B->db));
+				dprintf(errout, "%s\n", sqlite3_errmsg(B->db));
 			}
 			B = B->next;
 		}
