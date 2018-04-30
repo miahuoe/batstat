@@ -151,7 +151,7 @@ int bat_init(bat* const B)
 		return -1;
 	}
 	if ((B->db_r = sqlite3_exec(B->db, sql_init, NULL, 0, &B->db_err))) {
-
+		return B->db_r;
 	}
 	sqlite3_close(B->db);
 	return 0;
@@ -159,8 +159,15 @@ int bat_init(bat* const B)
 
 int bat_open(bat* const B)
 {
+	int fi = 0;
+	while (fields[fi]) {
+		size_t pl = strlen(B->sys_path)+1+strlen(fields[fi]);
+		B->fields[fi] = malloc(pl+1);
+		snprintf(B->fields[fi], pl+1, "%s/%s", B->sys_path, fields[fi]);
+		fi += 1;
+	}
 	if ((B->db_r = sqlite3_open(B->db_path, &B->db))) {
-		// INIT
+		return B->db_r;
 	}
 	return 0;
 }
@@ -182,7 +189,6 @@ int detect_bats(bat** H, const char* const logs_path)
 {
 	const size_t syspath_len = strlen(syspath);
 	const size_t logs_path_len = strlen(logs_path);
-	int e;
 	DIR* sys = opendir(syspath);
 	struct dirent* ent;
 	if (!sys) return errno;
@@ -207,23 +213,13 @@ int detect_bats(bat** H, const char* const logs_path)
 		B->next = *H;
 		*H = B;
 
-		if (!access(B->db_path, F_OK)) {
-			bat_open(B);
-		}
-		else {
-			bat_init(B);
-		}
-		int fi = 0;
-		size_t sys_pathlen = strlen(B->sys_path);
-		while (fields[fi]) {
-			size_t pl = sys_pathlen+1+strlen(fields[fi]);
-			B->fields[fi] = malloc(pl+1);
-			fi += 1;
+		if ((access(B->db_path, F_OK) && bat_init(B))
+		|| bat_open(B)) {
+			return 1;
 		}
 	}
-	e = errno;
 	closedir(sys);
-	return e;
+	return 0;
 }
 
 int bat_log(bat* const B)
@@ -250,13 +246,13 @@ int bat_log(bat* const B)
 		t, f[0], f[1], f[2], f[3], f[4], f[5], f[6]
 	);
 	if ((B->db_r = sqlite3_exec(B->db, qbuf, NULL, 0, &B->db_err))) {
-		sqlite3_errmsg(B->db);
 		return B->db_r;
 	}
 	return 0;
 }
 
 static bat* bats = 0;
+static FILE* errout = 0;
 
 void sighandler(int sig)
 {
@@ -270,6 +266,7 @@ void sighandler(int sig)
 			B = B->next;
 			free(old);
 		}
+		fclose(errout);
 		exit(EXIT_SUCCESS);
 		break;
 	default:
@@ -285,16 +282,19 @@ static const char* const help =
 	"  -h, --help\n"
 	"  \tdisplay this help message\n"
 	"  -l, --log-dir\n"
-	"  \tset log directory\n";
+	"  \tset log directory\n"
+	"  -e, --errout\n"
+	"  \tset error log file\n";
 
 int main(int argc, char* argv[])
 {
 	int e, o, opti = 0;
-	static const char sopt[] = "hdl:";
+	static const char sopt[] = "hdl:e:";
 	struct option lopt[] = {
+		{"help", no_argument, 0, 'h'},
 		{"daemon", no_argument, 0, 'd'},
 		{"log-dir", required_argument, 0, 'l'},
-		{"help", no_argument, 0, 'h'},
+		{"errout", required_argument, 0, 'e'},
 		{0, 0, 0, 0}
 	};
 	const char* logs_path = 0;
@@ -302,41 +302,48 @@ int main(int argc, char* argv[])
 	bat* B;
 	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
 		switch (o) {
+		case 'h':
+			printf("Usage: %s %s", argv[0], help);
+			exit(EXIT_SUCCESS);
 		case 'd':
 			daemon = 1;
 			break;
 		case 'l':
 			logs_path = optarg;
 			break;
-		case 'h':
-			printf("Usage: %s %s", argv[0], help);
-			exit(EXIT_SUCCESS);
+		case 'e':
+			errout = fopen(optarg, "a");
+			break;
 		default:
 			exit(EXIT_FAILURE);
 		}
 	}
+	if (!errout) {
+		errout = stderr;
+	}
 	if (!logs_path) {
-		fprintf(stderr, "ERROR: No log path suppiled.\n");
+		fprintf(errout, "ERROR: No log path suppiled.\n");
 		exit(EXIT_FAILURE);
 	}
 	if ((e = detect_bats(&bats, logs_path))) {
-		fprintf(stderr, "ERROR: %s\n", strerror(e));
+		fprintf(errout, "ERROR: %s\n", strerror(e));
 		exit(EXIT_FAILURE);
 	}
 	if (!bats) {
-		fprintf(stderr, "No batteries detected in '%s'\n", syspath);
+		fprintf(errout, "No batteries detected in '%s'\n", syspath);
 		exit(EXIT_FAILURE);
 	}
 	if (daemon && (e = daemonize())) {
-		fprintf(stderr, "ERROR: %s\n", strerror(e));
+		fprintf(errout, "ERROR: %s\n", strerror(e));
 		exit(EXIT_FAILURE);
 	}
-
 
 	for (;;) {
 		B = bats;
 		while (B) {
-			bat_log(B);
+			if (bat_log(B)) {
+				fprintf(errout, "%s\n", sqlite3_errmsg(B->db));
+			}
 			B = B->next;
 		}
 		sleep(5);
