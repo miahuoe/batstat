@@ -6,6 +6,8 @@ Uses a sqlite3 database.
 - mounted /sys
 - sqlite3 (for compilation)
 ## Features
+- Detect batteries in /sys/class/power\_supply
+- Log to sqlite3 database
 - Run as daemon
 - Save daemon's pid to file
 - Redirect error messages to file
