@@ -119,7 +119,7 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 	if ((r = read(fd, buf, bufs)) == -1) {
 		e = errno;
 	}
-	else {
+	else if (r >= 0) {
 		buf[r] = 0;
 	}
 	close(fd);
@@ -240,10 +240,10 @@ int detect_bats(bat** H, const char* const logs_path)
 int bat_log(bat* const B)
 {
 	static char catbuf[256];
-	static char qbuf[1024];
 	static long long f[FIELDS_LENGTH];
 	time_t t;
 	int fi = 0;
+	int i;
 
 	while (B->fields[fi]) {
 		cat(B->fields[fi], catbuf, sizeof(catbuf));
@@ -251,35 +251,17 @@ int bat_log(bat* const B)
 		fi += 1;
 	}
 	t = time(0);
-	if (B->stmt) {
-		if ((B->db_r = sqlite3_reset(B->stmt))
-		|| (B->db_r = sqlite3_clear_bindings(B->stmt))) {
-			return -1;
-		}
-		int i;
-		for (i = 1; i <= fi && !B->db_r; ++i) {
-			B->db_r = sqlite3_bind_int64(B->stmt, i, f[i-1]);
-		}
-		if (B->db_r
-		|| (B->db_r = sqlite3_bind_int64(B->stmt, i, t))
-		|| (B->db_r = sqlite3_step(B->stmt)) != SQLITE_DONE) {
-			return -1;
-		}
+	if ((B->db_r = sqlite3_reset(B->stmt))
+	|| (B->db_r = sqlite3_clear_bindings(B->stmt))) {
+		return -1;
 	}
-	else {
-		// TODO
-		snprintf(qbuf, sizeof(qbuf),
-			"INSERT INTO log "
-			"(time,present,cycle_count,"
-			"capacity,charge_full,charge_now,"
-			"current_now,voltage_now) "
-			"VALUES "
-			"(%ld, %lld, %lld, %lld, %lld, %lld, %lld, %lld);",
-			t, f[0], f[1], f[2], f[3], f[4], f[5], f[6]
-		);
-		if ((B->db_r = sqlite3_exec(B->db, qbuf, NULL, 0, &B->db_err))) {
-			return -1;
-		}
+	for (i = 1; i <= fi && !B->db_r; ++i) {
+		B->db_r = sqlite3_bind_int64(B->stmt, i, f[i-1]);
+	}
+	if (B->db_r
+	|| (B->db_r = sqlite3_bind_int64(B->stmt, i, t))
+	|| (B->db_r = sqlite3_step(B->stmt)) != SQLITE_DONE) {
+		return -1;
 	}
 	return 0;
 }
@@ -319,22 +301,26 @@ static const char* const help =
 	"  -e, --errfile\n"
 	"  \tSet error log file.\n"
 	"  -p, --pidfile\n"
-	"  \tCreate pidfile. No effect if used without --daemon.\n";
+	"  \tCreate pidfile. No effect if used without --daemon.\n"
+	"  -i, --interval\n"
+	"  \tSet interval in seconds. Must be > 0.\n";
 
 int main(int argc, char* argv[])
 {
-	int e, o, opti = 0;
-	static const char sopt[] = "hdl:e:p:";
+	int e = 0, o, opti = 0, interval = 5;
+	static const char* sopt = "hdl:e:p:i:";
 	struct option lopt[] = {
 		{"help", no_argument, 0, 'h'},
 		{"daemon", no_argument, 0, 'd'},
 		{"logdir", required_argument, 0, 'l'},
 		{"errfile", required_argument, 0, 'e'},
 		{"pidfile", required_argument, 0, 'p'},
+		{"interval", required_argument, 0, 'i'},
 		{0, 0, 0, 0}
 	};
 	const char* logs_path = 0;
 	const char* pidfile = 0;
+	char* es = 0;
 	_Bool daemon = 0;
 	bat* B;
 	while ((o = getopt_long(argc, argv, sopt, lopt, &opti)) != -1) {
@@ -349,29 +335,24 @@ int main(int argc, char* argv[])
 			logs_path = optarg;
 			break;
 		case 'e':
-			errout = open(optarg, O_WRONLY);
+			errout = creat(optarg, 0644);
 			break;
 		case 'p':
 			pidfile = optarg;
+			break;
+		case 'i':
+			interval = atoi(optarg);
 			break;
 		default:
 			exit(EXIT_FAILURE);
 		}
 	}
-	if (!logs_path) {
-		dprintf(errout, "ERROR: No log path suppiled.\n");
-		exit(EXIT_FAILURE);
-	}
-	if ((e = detect_bats(&bats, logs_path))) {
-		dprintf(errout, "ERROR: %s\n", strerror(e));
-		exit(EXIT_FAILURE);
-	}
-	if (!bats) {
-		dprintf(errout, "No batteries detected in '%s'\n", syspath);
-		exit(EXIT_FAILURE);
-	}
-	if (daemon && (e = daemonize(pidfile))) {
-		dprintf(errout, "ERROR: %s\n", strerror(e));
+	if ((es = "No log path suppiled.", !logs_path)
+	|| (es = "Interval must be > 0.", interval <= 0)
+	|| (e = detect_bats(&bats, logs_path))
+	|| (es = "No batteries detected.\n", !bats)
+	|| (daemon && (e = daemonize(pidfile)))) {
+		dprintf(errout, "ERROR: %s\n", e ? strerror(e) : es);
 		exit(EXIT_FAILURE);
 	}
 
@@ -384,7 +365,7 @@ int main(int argc, char* argv[])
 			}
 			B = B->next;
 		}
-		sleep(5);
+		sleep(interval);
 	}
 	exit(EXIT_SUCCESS);
 }
