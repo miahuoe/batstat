@@ -70,24 +70,34 @@ int bat_open(bat* const);
 void bat_close(bat* const);
 void sighandler(int);
 
+static bat* bats = 0;
+static int errout = STDERR_FILENO;
+
 int daemonize(const char* pidfile)
 {
-	int nullfd;
+	char buf[16];
+	int nullfd, pf;
+	ssize_t w;
+	struct sigaction sa;
+
+	pf = open(pidfile, O_EXCL | O_WRONLY | O_CREAT, 0440);
+	if (pf == -1) {
+		if (errno == EEXIST) {
+			dprintf(errout, "ERROR: '%s' exists.\n", pidfile);
+		}
+		exit(EXIT_FAILURE);
+	}
 	pid_t pid = fork();
 	if (pid < 0) {
 		return errno;
 	}
 	if (pid > 0) {
-		int pf = creat(pidfile, 0600);
-		if (pf == -1) {
-			exit(EXIT_FAILURE);
-		}
-		char buf[16];
-		int w = snprintf(buf, sizeof(buf), "%d", pid);
+		w = snprintf(buf, sizeof(buf), "%d", pid);
 		write(pf, buf, w);
 		close(pf);
 		exit(EXIT_SUCCESS);
 	}
+	close(pf);
 
 	setsid();
 
@@ -100,7 +110,6 @@ int daemonize(const char* pidfile)
 	close(nullfd);
 
 	umask(0027);
-	struct sigaction sa;
 	memset(&sa, 0, sizeof(struct sigaction));
 	sa.sa_handler = sighandler;
 	if (chdir("/") || sigaction(SIGTERM, &sa, NULL)) {
@@ -113,6 +122,7 @@ int cat(const char* const path, char* const buf, const size_t bufs)
 {
 	int e = 0, fd;
 	ssize_t r;
+
 	if ((fd = open(path, O_RDONLY)) == -1) {
 		return errno;
 	}
@@ -173,8 +183,10 @@ int bat_open(bat* const B)
 {
 	int fi = 0;
 	const char* tail;
+	size_t pl;
+
 	while (fields[fi]) {
-		size_t pl = strlen(B->sys_path)+1+strlen(fields[fi]);
+		pl = strlen(B->sys_path)+1+strlen(fields[fi]);
 		B->fields[fi] = malloc(pl+1);
 		snprintf(B->fields[fi], pl+1, "%s/%s", B->sys_path, fields[fi]);
 		fi += 1;
@@ -189,12 +201,12 @@ int bat_open(bat* const B)
 
 void bat_close(bat* const B)
 {
+	int fi = 0;
 	sqlite3_close(B->db);
 	free(B->name);
 	free(B->sys_path);
 	free(B->db_path);
 	sqlite3_finalize(B->stmt);
-	int fi = 0;
 	while (B->fields[fi]) {
 		free(B->fields[fi]);
 		fi += 1;
@@ -230,7 +242,7 @@ int detect_bats(bat** H, const char* const logs_path)
 		*H = B;
 
 		if ((access(B->db_path, F_OK) && bat_init(B)) || bat_open(B)) {
-			return 1;
+			return -1;
 		}
 	}
 	closedir(sys);
@@ -266,9 +278,6 @@ int bat_log(bat* const B)
 	return 0;
 }
 
-static bat* bats = 0;
-static int errout = STDERR_FILENO;
-
 void sighandler(int sig)
 {
 	bat* B, *old;
@@ -296,13 +305,14 @@ static const char* const help =
 	"  \tRun in backgroud.\n"
 	"  -h, --help\n"
 	"  \tDisplay this help message.\n"
-	"  -l, --logdir\n"
+	"  -l, --logdir=DIRECTORY\n"
 	"  \tSet log directory.\n"
-	"  -e, --errfile\n"
+	"  -e, --errfile=FILE\n"
 	"  \tSet error log file.\n"
-	"  -p, --pidfile\n"
+	"  -p, --pidfile=FILE\n"
 	"  \tCreate pidfile. No effect if used without --daemon.\n"
-	"  -i, --interval\n"
+	"  \tExits if pidfile exists.\n"
+	"  -i, --interval=NUM\n"
 	"  \tSet interval in seconds. Must be > 0.\n";
 
 int main(int argc, char* argv[])
@@ -335,7 +345,7 @@ int main(int argc, char* argv[])
 			logs_path = optarg;
 			break;
 		case 'e':
-			errout = creat(optarg, 0644);
+			errout = open(optarg, O_WRONLY, 0644);
 			break;
 		case 'p':
 			pidfile = optarg;
@@ -360,8 +370,9 @@ int main(int argc, char* argv[])
 		B = bats;
 		while (B) {
 			if (bat_log(B)) {
-				dprintf(errout, "E%d: %s\n",
-					B->db_r, sqlite3_errmsg(B->db));
+				dprintf(errout, "%ld E%d: %s\n",
+					time(0), B->db_r,
+					sqlite3_errmsg(B->db));
 			}
 			B = B->next;
 		}
